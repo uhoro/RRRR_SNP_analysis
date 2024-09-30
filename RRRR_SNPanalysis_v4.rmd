@@ -1,0 +1,1328 @@
+---
+title: "RRRR_SNPanalysis_v4"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval=FALSE)
+```
+
+# Description
+
+This is an R Markdown document used to analyze variant calling results of Ros-Rocher and Reyes-Rivera et al. 
+
+# Phylogenomic tree construction
+## Generate phylip format input file from vcf file to construct phylogenomic tree using IQ-TREE2
+
+```{r}
+######
+# Variants already filtered using bcftools (in samtools/1.18) with following settings
+# with DP >= 5 threshold
+# 
+# 
+# Do threshold
+# -m2 -M2 -e 'TYPE = "INDEL" || QUAL <= 30 || FORMAT/DP <= 4 || GT[*] = "mis" || GT[*] = "het"'
+#
+# srun -J filt -c 5 bcftools view --threads 4 -m2 -M2 -e \
+# 'TYPE = "INDEL" || QUAL <= 30 || FORMAT/DP <= 4 || GT[*] = "mis" || GT[*] = "het"'
+# FilteredVCFs/all_samples_p2_flexa_240723_set240924_wo_C1A4.vcf > \
+# FilteredVCFs/all_samples_p2_flexa_240723_set240924_wo_C1A4_filter.vcf
+# 
+######
+library(vcfR)
+vcfp2 <- read.vcfR(file = "FilteredGVCFs/all_samples_p2_flexa_240723_set240924_wo_C1A4_filter.vcf")
+
+snpp2 <- vcfp2
+FIXp2 <- as.data.frame(getFIX(snpp2))
+gtp2 <- as.data.frame(extract.gt(snpp2, IDtoRowNames = TRUE))
+gtp2 <- tibble::rownames_to_column(gtp2, var = "id")
+bindedp2 <- cbind(FIXp2, gtp2)
+
+# Check if all sites are the same
+bindedp2 %>%
+  rowwise() %>%
+  mutate(
+    all_1 = case_when(
+      substring(C1A1,1,1) == "1" && substring(C1A10,1,1) == "1" &&
+       substring(C1C5v2,1,1) == "1" &&
+      substring(C1C51,1,1) == "1" && substring(C1E4,1,1) == "1" &&
+      substring(C1G11,1,1) == "1" && substring(C2F9,1,1) == "1" &&
+      substring(C2H11,1,1) == "1" && substring(C3D7v2,1,1) == "1" &&
+      substring(SM44B,1,1) == "1" && substring(SM60B,1,1) == "1" ~ 1,
+      .default = 0
+    ),
+    all_same = case_when(
+      substring(C1A1,1,1) == substring(C1A10,1,1) && 
+        substring(C1C5v2,1,1) == substring(C1A1,1,1) &&
+        substring(C1C51,1,1) == substring(C1A1,1,1) && substring(C1E4,1,1) == substring(C1A1,1,1) &&
+        substring(C1G11,1,1) == substring(C1A1,1,1) && substring(C2F9,1,1) == substring(C1A1,1,1) &&
+        substring(C2H11,1,1) == substring(C1A1,1,1) && substring(C3D7v2,1,1) == substring(C1A1,1,1) &&
+        substring(SM44B,1,1) == substring(C1A1,1,1) && substring(SM60B,1,1) == substring(C1A1,1,1) ~ 1,
+      .default = 0
+    )
+  ) %>%
+  filter(
+    all_same == 0
+  ) -> bindedp2_alldif
+
+### Get SNP with > 1 read depth and all sites are different (can use ASC correction)
+nrow(bindedp2_alldif) #nrow is 193564
+sink("tree_all_p2/all_p2_set240924_wo_C1A4_DP5.phy")
+cat("11 193564")
+cat("\n")
+for (sample in c("C1A1", "C1A10", "C1C5v2", "C1C51", "C1E4",
+                 "C1G11", "C2F9", "C2H11", "C3D7v2", "SM44B", "SM60B")) {
+  vec <- paste(substring(bindedp2_alldif[[sample]], 1, 1), collapse = "")
+  space <- paste(rep(" ", 10 - nchar(sample)), collapse = "")
+  line <- paste(sample, space, vec, sep = "")
+  cat(line)
+  cat("\n")
+}
+sink()
+
+```
+
+The following command was used to construct phylogenomic tree using iqtree2
+> iqtree2 -s all_p2_DP2_set240924.phy -m GTR2+G+ASC -B 1000 -alrt 1000 -nt AUTO
+
+# Clonality analysis
+
+Compute the overlap of SNP between sheets and single cell-bottlenecked samples
+
+Python implementation is much faster, see "clonality.ipynb"
+The draft code was generated using R to python converter of Syntha AI https://syntha.ai/converters/r-to-python and debugged by UH
+
+Helper functions to compute overlap between sheet and clone samples
+```{r} 
+# Helper functions to compute overlap between sheet and clone samples
+get_overlap_table <- function(sample_vec, data) {
+  res_count <- data.frame(matrix(NA, nrow = length(sample_vec), ncol = length(sample_vec)))
+  res_count_r <- data.frame(matrix(NA, nrow = length(sample_vec), ncol = length(sample_vec)))
+  res_count_f <- data.frame(matrix(NA, nrow = length(sample_vec), ncol = length(sample_vec)))
+  result <- data
+  for (s1i in 1:(length(sample_vec)-1)) {
+    for (s2i in (s1i+1):(length(sample_vec))) {
+      s1 <- sample_vec[s1i]
+      s2 <- sample_vec[s2i]
+      print(paste("start processing: ", s1, " and ", s2, " pair", sep = ""))
+      new <- get_overlap(s1, s2, data)
+      result <- cbind(result, new)
+      
+      coln <- paste("is", s1, s2, sep = "_")
+      is_count <- nchar(paste(result[, coln], collapse = ""))
+      coln <- paste("u", s1, s2, sep = "_")
+      res_count[s1i, s2i] <- nchar(paste(result[, coln], collapse = ""))
+      res_count_r[s1i, s2i] <- res_count[s1i, s2i] / (res_count[s1i, s2i] + is_count)
+      coln <- paste("u", s1, s2, "f", sep = "_")
+      res_count_f[s1i, s2i] <- sum(result[, coln])
+      coln <- paste("u", s2, s1, sep = "_")
+      res_count[s2i, s1i] <- nchar(paste(result[, coln], collapse = ""))
+      res_count_r[s2i, s1i] <- res_count[s2i, s1i] / (res_count[s2i, s1i] + is_count)
+      coln <- paste("u", s2, s1, "f", sep = "_")
+      res_count_f[s2i, s1i] <- sum(result[, coln])
+    }
+  }
+  rownames(res_count) <- sample_vec
+  rownames(res_count_r) <- sample_vec
+  rownames(res_count_f) <- sample_vec
+  return(list("res_count" = res_count, 
+              "res_count_r" = res_count_r, 
+              "res_count_f" = res_count_f,
+              "result" = result))
+}
+
+count_ele <- function(vec1, vec2) {
+  res <- 0
+  for (i in 1:length(vec1)) {
+    if (vec1[i] %in% vec2) {
+      res <- res + 1
+    }
+  }
+  return(res)
+}
+
+get_overlap <- function(s1, s2, data) {
+
+  # initialize output columns 
+  is_s1_s2_vec <- c()
+  u_s1_s2_vec <- c()
+  u_s1_s2_f_vec <- c()
+  u_s2_s1_vec <- c()
+  u_s2_s1_f_vec <- c()
+  
+  for (i in 1:nrow(data)){
+    if (i %% 10000 == 0) {
+      print(paste("finished processing variant: ", i, sep = ""))
+    }
+    vec1 <- unlist(str_split(data[i, s1], pattern = "/"))
+    vec2 <- unlist(str_split(data[i, s2], pattern = "/"))
+    
+    is_s1_s2 <- intersect(vec1,vec2)
+    is_s1_s2_vec <- c(is_s1_s2_vec, paste(is_s1_s2, collapse = ""))
+    
+    u_s1_s2 <- setdiff(vec1, vec2) # get allele that is unique to s1
+    u_s1_s2_vec <- c(u_s1_s2_vec, paste(u_s1_s2, collapse = ""))
+    
+    u_s1_s2_f <- count_ele(vec1, u_s1_s2) # count frequency of allele that is unique to s1
+    u_s1_s2_f_vec <- c(u_s1_s2_f_vec, u_s1_s2_f)
+    
+    u_s2_s1 <- setdiff(vec2, vec1) # get allele that is unique to s2
+    u_s2_s1_vec <- c(u_s2_s1_vec, paste(u_s2_s1, collapse = ""))
+    
+    u_s2_s1_f <- count_ele(vec2, u_s2_s1) # count frequency of allele that is unique to s2
+    u_s2_s1_f_vec <- c(u_s2_s1_f_vec, u_s2_s1_f)
+  }
+  df <- data.frame(is_s1_s2_vec, u_s1_s2_vec, u_s1_s2_f_vec, u_s2_s1_vec, u_s2_s1_f_vec)
+  names(df)[1] <- paste("is", s1, s2, sep = "_")
+  names(df)[2] <- paste("u", s1, s2, sep = "_")
+  names(df)[3] <- paste("u", s1, s2, "f", sep = "_")
+  names(df)[4] <- paste("u", s2, s1, sep = "_")
+  names(df)[5] <- paste("u", s2, s1, "f", sep = "_")
+  return(df)
+}
+```
+
+Prepare input file by converting from .vcf to .csv
+```{r}
+# compute the overlap of SNP between sheets and single cell-bottlenecked samples
+# vcfp4 <- read.vcfR(file = "FilteredGVCFs/all_samples_p4_flexa_240723_set240924_DP2.vcf")
+# vcfp4 <- read.vcfR(file = "FilteredGVCFs/all_samples_p4_flexa_240723_set240924_wo_C1A4_DP5.vcf")
+
+snpp4 <- extract.indels(vcfp4)
+FIXp4 <- as.data.frame(getFIX(snpp4))
+gtp4 <- as.data.frame(extract.gt(snpp4, IDtoRowNames = TRUE))
+gtp4 <- tibble::rownames_to_column(gtp4, var = "id")
+bindedp4 <- cbind(FIXp4, gtp4)
+dpp4 <- as.data.frame(extract.gt(snpp4, element = "DP", IDtoRowNames = FALSE))
+
+addDP <- function(str) {
+  return(paste("DP", str, sep = ""))
+}
+
+colnames(dpp4) <- unlist(lapply(colnames(dpp4), addDP))
+
+bindedp4 <- cbind(bindedp4, dpp4)
+write.csv(bindedp4, "p4/bindedp4_set240924_wo_C1A4_DP5.csv", row.names = FALSE)
+
+#vcfp4 <- read.vcfR(file = "FilteredGVCFs/all_samples_p4_flexa_240723_set240924_DP2_INDEL.vcf")
+vcfp4 <- read.vcfR(file = "FilteredGVCFs/all_samples_p4_flexa_240723_set240924_wo_C1A4_DP5_INDEL.vcf")
+
+indelp4 <- extract.indels(vcfp4, return.indels = TRUE)
+FIXp4 <- as.data.frame(getFIX(indelp4))
+gtp4 <- as.data.frame(extract.gt(indelp4, IDtoRowNames = TRUE))
+gtp4 <- tibble::rownames_to_column(gtp4, var = "id")
+bindedp4 <- cbind(FIXp4, gtp4)
+dpp4 <- as.data.frame(extract.gt(indelp4, element = "DP", IDtoRowNames = FALSE))
+
+addDP <- function(str) {
+  return(paste("DP", str, sep = ""))
+}
+
+colnames(dpp4) <- unlist(lapply(colnames(dpp4), addDP))
+
+bindedp4 <- cbind(bindedp4, dpp4)
+write.csv(bindedp4, "p4/bindedp4_set240924_wo_C1A4_DP5_INDEL.csv", row.names = FALSE)
+
+```
+
+Compute overlap
+
+```{r}
+# binded <- read.csv("p4/bindedp4_set240924_wo_C1A4_DP5_INDEL.csv")
+# 
+# sample_vec2 <- c("SM44B", "C1C5v2", "C1A10", "C1E4", "C2F9", 
+#                  "SM60B", "C3D7v2", "C1C51", "C2H11", "SM61",
+#                  "C1G11", "C1A1")
+# 
+# result_lis2 <- get_overlap_table(sample_vec2, binded)
+# 
+# res_count_all_p4 <- result_lis2[["res_count"]]
+# write.csv(res_count_all_p4, "p4/res_count_set240924_wo_C1A4_DP5_INDEL.csv")
+# res_count_all_4 <- read.csv("p4/res_count_set240924_wo_C1A4_DP5_INDEL.csv")
+# 
+# res_count_r_all_p4 <- result_lis2[["res_count_r"]]
+# write.csv(res_count_r_all_p4, "p4/res_count_set240924_wo_C1A4_DP5_INDEL.csv")
+```
+
+Shape data in a form of matrix
+
+```{r}
+library(forcats)
+
+sample_vec2 <- c("SM44B", "C1C5v2", "C1A10", "C1E4", "C2F9",
+                 "SM60B", "C3D7v2", "C1C51", "C2H11", 
+                 "C1G11", "C1A1")
+
+#res_count_r_all_p4 <- read.csv("p4/bindedp4_set240924_wo_C1A4_DP5_res_count_r.csv")
+res_count_r_all_p4 <- read.csv("p4/bindedp4_set240924_wo_C1A4_DP5_INDEL_res_count_r.csv")
+res_count_r_all_p4 <- res_count_r_all_p4[,2:12]
+colnames(res_count_r_all_p4) <- sample_vec2
+rownames(res_count_r_all_p4) <- sample_vec2
+res_count_r_all_p4 %>%
+  rownames_to_column("s1") %>% 
+  pivot_longer(-s1, names_to = "s2", values_to = "r") %>%
+  mutate(
+    s1 = fct_relevel(s1, "SM44B", "C1C5v2", "C1A10", "C1E4", "C2F9",
+                 "SM60B", "C3D7v2", "C1C51", "C2H11", 
+                 "C1G11", "C1A1"),
+    s2 = fct_relevel(s2, "SM44B", "C1C5v2", "C1A10", "C1E4", "C2F9",
+                 "SM60B", "C3D7v2", "C1C51", "C2H11", 
+                 "C1G11", "C1A1")
+  ) -> res_count_r_all_reshaped_p4
+
+
+ggplot(res_count_r_all_reshaped_p4, aes(s2, s1)) + 
+  theme_bw() + 
+  geom_tile(aes(fill = r)) + 
+  geom_text(aes(label = round(r, 4))) +
+  scale_fill_gradient(low = "red", high = "white") +
+  scale_y_discrete(limits=rev)
+
+ggsave("p4/bindedp4_set240924_wo_C1A4_DP5_INDEL_res_count_r.svg")
+
+
+```
+
+# Interproscan feature enrichment analysis
+
+## Ka/Ks analysis
+
+Prepare sequences for KaKs analysis.
+To do this, we first annotate SNP using snpEff.
+
+Extract synonymous, mis sense, non sense mutations
+```{r}
+
+vcfp1all <- read.vcfR(file = "FilteredGVCFs/all_samples_hap_flexa_240723_set240924_wo_C1A4_DP2.ann.filter.vcf")
+
+snpp1 <- extract.indels(vcfp1all)
+FIXp1 <- as.data.frame(getFIX(snpp1))
+gtp1 <- as.data.frame(extract.gt(snpp1, IDtoRowNames = TRUE))
+gtp1 <- tibble::rownames_to_column(gtp1, var = "id")
+bindedp1 <- cbind(FIXp1, gtp1)
+dpp1 <- as.data.frame(extract.gt(snpp1, element = "DP", IDtoRowNames = FALSE))
+ADp1 <- as.data.frame(extract.gt(snpp1, element = "AD", IDtoRowNames = FALSE))
+
+addDP <- function(str) {
+  return(paste("DP", str, sep = ""))
+}
+
+colnames(dpp1) <- unlist(lapply(colnames(dpp1), addDP))
+
+addAD <- function(str) {
+  return(paste("AD", str, sep = ""))
+}
+
+colnames(ADp1) <- unlist(lapply(colnames(ADp1), addAD))
+
+ANNp1 <- as.data.frame(extract.info(snpp1, element = "ANN"))
+LOFp1 <- as.data.frame(extract.info(snpp1, element = "LOF"))
+NMDp1 <- as.data.frame(extract.info(snpp1, element = "NMD"))
+
+bindedp1 <- cbind(bindedp1, dpp1, ADp1, ANNp1, LOFp1, NMDp1)
+#bindedp1 <- df(bindedp1)
+
+# remove SNP sites in H. oceani scaffold: scaffold_530, scaffold_41, scaffold_87
+bindedp1 %>%
+ filter(!CHROM %in% c("scaffold_530", "scaffold_41", "scaffold_87")) -> bindedp1_clean
+# No match, which makes sense. 
+
+
+names(bindedp1_clean)[42] <- "ANN"
+names(bindedp1_clean)[43] <- "LOF"
+names(bindedp1_clean)[44] <- "NMD"
+
+path_to_rbbh <- "/Users/uhoro/bio/pasteur/Cflexa_genome_2024-05-02/Salpingoeca_rosetta_protein.MOD.faa.Cflexa.proteins.fa.rbbh"
+# convert chr names:
+rbbh <- readLines(path_to_rbbh)
+Sros <- c()
+Cfle <- c()
+for (i in 1:length(rbbh)){
+  sros <- unlist(strsplit(rbbh[i], split = "\t"))[1]
+  sros <- unlist(strsplit(sros, split = "|", fixed=TRUE))[2]
+  sros <- unlist(strsplit(sros, split = ".", fixed=TRUE))[1]
+  Sros <- c(Sros, sros)
+  cfle <- unlist(strsplit(rbbh[i], split = "\t"))[2]
+  cfle <- unlist(strsplit(cfle, split = "-"))[1]
+  Cfle <- c(Cfle, cfle)
+}
+df_rbbh <- data.frame(Sros, Cfle)
+
+map_sros <- function(Cfle_g) {
+  Sros_rbbh <- df_rbbh$Sros[df_rbbh$Cfle == Cfle_g]
+  if (length(Sros_rbbh) == 0) {
+    return("None")
+  } else if (length(Sros_rbbh) != 1) {
+    return(Sros_rbbh[1])
+  } else {
+    return(Sros_rbbh)
+  }
+} 
+
+map_prot <- function(id) {
+  prot_name <- Sros_prot_annot_updated$Protein.names[which(Sros_prot_annot_updated$Sros_id == id)]
+  if (length(prot_name) == 0) {
+    return("None")
+  } else if (length(prot_name) != 1) {
+    return(prot_name[1])
+  } else {
+    return(prot_name)
+  }
+} 
+
+bindedp1_clean %>%
+  rowwise() %>%
+  mutate(
+    Cfle_g = unlist(strsplit(ANN, split = "|", fixed = TRUE))[4]
+  ) %>% 
+  mutate(
+    Sros_rbbh = map_sros(Cfle_g)
+  ) -> bindedp1_g_annot
+
+Sros_prot_annot_path <- "/Users/uhoro/bio/pasteur/Cflexa_genome_2024-05-02/Sros_protein_annot.tsv"
+Sros_prot_annot <- read.delim(Sros_prot_annot_path)
+Sros_prot_annot %>%
+  rowwise() %>%
+  mutate(
+    Sros_id = unlist(strsplit(EnsemblProtists, split = ";", fixed = TRUE))[1]
+  ) -> Sros_prot_annot_updated
+
+bindedp1_g_annot %>%
+  rowwise() %>%
+  mutate(
+    Sros_prot_name = map_prot(Sros_rbbh)
+  ) -> bindedp1_g_annot_prot
+
+#write.csv(bindedp1_g_annot_prot, "SNPp1_g_annot_full_set240924_wo_C1A4_DP2.ann.filter.csv", row.names = FALSE)
+
+#bindedp1_g_annot_prot <- read.csv("SNPp1_g_annot_full.csv")
+  
+bindedp1_g_annot_prot %>%
+  rowwise() %>%
+  mutate(
+    syn = case_when(
+      unlist(strsplit(ANN, split = "|", fixed = TRUE))[2] == "synonymous_variant" ~ 1,
+      .default = 0
+    ),
+    mis = case_when(
+      unlist(strsplit(ANN, split = "|", fixed = TRUE))[2] == "missense_variant" ~ 1,
+      .default = 0
+    ),
+    non = case_when(
+      unlist(strsplit(ANN, split = "|", fixed = TRUE))[2] == "stop_gained" ~ 1,
+      .default = 0
+    )
+  ) -> bindedp1_filtered_g_annot_prot_class
+
+bindedp1_g_annot_prot_class <- bindedp2_filtered_g_annot_prot_class
+setwd("/Users/uhoro/bio/pasteur/variant_calling/flexa/")
+write.csv(bindedp1_g_annot_prot_class, "SNPp1_set240924_wo_C1A4_DP2.ann.filter.g_annot_prot_class.csv", row.names = FALSE)
+
+bindedp1_g_annot_prot_class %>%
+  filter(syn == 1 | mis == 1 | non == 1) -> bindedp1_g_annot_prot_synmisnon
+write.csv(bindedp1_g_annot_prot_synmisnon, "SNPp1_set240924_wo_C1A4_DP2.ann.filter.g_annot_prot_synmisnon.csv", row.names = FALSE)
+```
+
+Prepare datasets with different read depth criteria
+```{r}
+# From SNP data using lower read depth criteria ("bindedp1_g_annot_prot_synmis.csv), 
+# create higher quality SNP datasets.
+# "bindedp1_g_annot_prot_synmis.csv" is generated using flexa_variant_calling_v2_continue.rmd
+data_name <- "SNPp1_set240924_wo_C1A4_DP2.ann.filter.g_annot_prot_synmisnon.csv"
+
+bindedp1_g_annot_prot_mut <- read.csv(data_name)
+
+bindedp1_g_annot_prot_mut_DP2 <-bindedp1_g_annot_prot_mut
+
+bindedp1_g_annot_prot_mut %>%
+  filter(DPC1C5v2 >= 5 & DPC3D7v2 >= 5) -> bindedp1_g_annot_prot_mut_DP5_C1C5v2_C3D7v2
+
+
+```
+
+Prepare C. flexa cds sequences
+```{r}
+# clean working directory
+#rm(list = ls(all = TRUE))
+library(seqinr)
+library(tidyverse)
+cds.fasta.in <- "/Users/uhoro/bio/pasteur/Cflexa_genome_2024-07-16/Cflexa.cds-transcripts.Hoceani_pruned.fa"
+# read in fasta file with all proteins
+print(paste0('Reading in ', cds.fasta.in, '...'))
+cds.fa <- read.fasta(cds.fasta.in, seqtype = 'DNA', as.string = TRUE, set.attributes = FALSE,
+                 whole.header = TRUE)
+# convert list to data frame
+cds_fa_df <- data.frame('Name' = names(cds.fa), stringsAsFactors = FALSE)
+for (i in 1:length(names(cds.fa)))
+{
+  cds_fa_df$sequence[i] <- toupper(cds.fa[[i]])
+}
+
+cds_fa_df %>%
+  rowwise() %>%
+  mutate(
+    geneid = unlist(strsplit(Name, split = " "))[2],
+    len_cds = nchar(sequence)
+  ) -> cds_fa_df_updated
+```
+
+Get variant sequences given SNP data
+We only focus on dN/dS (KaKs) ratio between C1G11 and C1C5v2 since that 
+displayed the highest kin recognition index
+
+```{r}
+
+bindedp1_g_annot_prot_mut_DP5 <- bindedp1_g_annot_prot_mut_DP5_C1C5v2_C3D7v2
+
+samples <- c("C1G11","C1C5v2")
+geneid_vec <- unique(bindedp1_g_annot_prot_mut_DP5$Cfle_g)
+
+# Initialize file
+sinkfname <- "SNP_DP5/variant_seq/C1G11_C1C5v2.axt"
+sink(sinkfname)
+sink()
+i <- 0
+for (gene_id in geneid_vec) {
+  i <- i + 1
+  print(paste(i, " th gene"))
+  print(paste("start processing: ", gene_id))
+  cds <- cds_fa_df_updated$sequence[cds_fa_df_updated$geneid == gene_id]
+  cds_vec <- rep(cds, length(samples))
+  bindedp1_g_annot_prot_mut_DP2 %>%
+      filter(Cfle_g == gene_id) -> bindedp1_g_annot_prot_test
+  
+  for (iSNP in 1:nrow(bindedp1_g_annot_prot_test)){
+    REF_SNP <- as.character(bindedp1_g_annot_prot_test[iSNP, "REF"])
+    alt_vec <- unlist(strsplit(as.character(bindedp1_g_annot_prot_test[iSNP, "ALT"]), ","))
+    df_test <- tibble(ANN = unlist(strsplit(as.character(bindedp1_g_annot_prot_test[iSNP, "ANN"]), ",")))
+    df_test_wider <- df_test %>% 
+        separate(ANN, c("allele", "annot", "impact", "gene_name", "gene_id", "feature_type",
+                         "feature_ID","transcript_biotype", "rank_total", "HGVS.c", "HGVS.p", 
+                         "cDNApos", "CDSpos", "Protpos", "dist_to_feature"), "\\|", extra = "merge")
+  
+    # Get CDS position of SNP according to non "*" mutation annotation
+    SNP_type_ref <- 1
+    if (alt_vec[1] == "*") {
+      SNP_type_ref <- 2
+    }
+    
+    # Check if DNA is in sense or antisense
+    HGVSc <- df_test_wider$HGVS.c[df_test_wider$allele == alt_vec[SNP_type_ref] &
+                                         df_test_wider$gene_id == gene_id]
+    len_HGVSc <- nchar(HGVSc)
+
+    REFcdsSNP <- substr(HGVSc, len_HGVSc-2, len_HGVSc-2)
+
+    
+    CDSpos <- df_test_wider$CDSpos[df_test_wider$allele == alt_vec[SNP_type_ref] &
+                                         df_test_wider$gene_id == gene_id]
+    SNPpos <- as.numeric(unlist(strsplit(CDSpos, "/"))[1])
+    
+    # Update variant sequence for each sample
+    for (isample in 1:length(samples)) {
+      SNP_type <- as.numeric(bindedp1_g_annot_prot_test[iSNP, samples[isample]])
+      if (SNP_type == 0) {
+       next
+      } else {
+        #print(alt_vec[SNP_type])
+        if (alt_vec[SNP_type] != "*") {
+          ALT <- alt_vec[SNP_type]
+              if (REF_SNP != REFcdsSNP) {
+                if (alt_vec[SNP_type] == "A") {
+                  ALT <- "T"
+                } else if (alt_vec[SNP_type] == "T") {
+                  ALT <- "A"
+                } else if (alt_vec[SNP_type] == "G") {
+                  ALT <- "C"
+                } else if (alt_vec[SNP_type] == "C") {
+                  ALT <- "G"
+                }
+              }
+          substr(cds_vec[isample],SNPpos,SNPpos) <- ALT
+        } else {
+          print(paste("* found at ", SNPpos, sep = ""))
+          substr(cds_vec[isample],SNPpos,SNPpos) <-  "-"
+        }
+        
+      }
+    }
+  }
+  sink(sinkfname, append = TRUE)
+  # record the variant fasta sequence
+  # C1G11 is in cds_vec[1] and C1C5v2 is in cds_vec[2]
+  
+  header <- paste(gene_id, samples[1], samples[2], sep = "_")
+  cat(header)
+  cat("\n")
+  cat(cds_vec[1])
+  cat("\n")
+  cat(cds_vec[2])
+  cat("\n")
+  cat("\n")
+  # for (isample in 1:length(samples)) {
+  #   header <- paste(gene_id, samples[isample], sep = "_")
+  #   cat(header)
+  #   cat("\n")
+  #   cat(cds)
+  #   cat("\n")
+  #   cat(cds_vec[isample])
+  #   cat("\n")
+  #   cat("\n")
+  # }
+  sink()
+}
+
+
+```
+
+Do gene-wise KaKs (dN/dS) ratio analysis using KaKs_Calculator2.0
+Fork of the KaKs_Calculator2.0 project was used: https://sourceforge.net/projects/kakscalculator2
+
+```{r}
+kakas_df <- read.table("SNP_DP5/variant_seq/C1G11_C1C5v2.axt.kaks", sep = "\t", header = TRUE)
+
+kakas_df %>%
+  filter(Ka.Ks > 1 & P.Value.Fisher. <= 0.05) -> kakas_df_filt
+
+```
+
+We conduct sliding window KaKs (dN/dS) ratio analysis on the resultant axt file
+
+Run split in src directory of KaKs_calculator
+> Java split /Users/uhoro/bio/pasteur/variant_calling/flexa/SNP_DP5/variant_seq/C1G11_C1C5v2.axt 114 6
+
+The resultant file is too big and KaKs_calculator gives truncated results 
+So split before running it
+> awk -v N=1 -v pre="C1G11_C1C5v2split_114_6_" -v suf=".axt" -v line=5000000 'NR%line==1{x=pre N suf ;N++} {print > x}' C1G11_C1C5v2split_114_6.axt
+
+Run KaKs calculator to get kaks values
+ First move to bin directory. Then run
+> ./KaKs_Calculator -i /Users/uhoro/bio/pasteur/variant_calling/flexa/SNP_DP5/variant_seq/C1G11_C1C5v2split_114_6_2.axt -o /Users/uhoro/bio/pasteur/variant_calling/flexa/SNP_DP5/variant_seq/C1G11_C1C5v2split_114_6_2.axt.kaks -m GYN
+
+Then, reshape the resultant axt.kaks file 
+and find genes with KaKs >= 2 region.
+
+Store the result in SNP_DP5/C1G11_SM44B_KaKs_all.csv file
+
+It's also reimplemented in python, see "Find_high_KaKs_v2.ipynb"
+The draft code was generated using R to python converter of Syntha AI https://syntha.ai/converters/r-to-python and debugged by UH
+
+```{r}
+# Define helper function to find genes with KaKs region of interest
+get_KaKs_region <- function(geneid_df, 
+                                    threshold = 1, 
+                                    step_size = 6,
+                                    block_length = 30) {
+  vec <- geneid_df$Ka.Ks > threshold
+  
+  n_bases <- 0 # number of bases with KaKs > 1
+  KaKs_r <- 0 # KaKs > 1 ratio
+  n_blocks <- 0 # number of >= 30 bases blocks with KaKs > 1
+  len <- 0
+  pos_info <- "pos"
+  if (sum(vec, na.rm = TRUE) == 0) {
+    return(c(n_bases, KaKs_r, n_blocks, pos_info))
+  }
+  n_bases <- sum(vec, na.rm = TRUE) * step_size
+  KaKs_r <- sum(vec, na.rm = TRUE)/length(vec)
+  
+  for (start in 1:length(vec)) {
+    if (is.na(vec[start])) {
+      next
+    }
+    else if (!vec[start]) {
+      next
+    }
+    for (end in start:length(vec)) {
+      len <- end - start + 1
+      if (sum(vec[start:end], na.rm = TRUE) != len) {
+        
+        # print(paste("start base: ", start * step_size))
+        # print(paste("end base: ", (end - 1) * step_size))
+        # print(paste(">= 30 bases: ", (end - start) >= (block_length/step_size)))
+        if ((end - start) >= (block_length/step_size) ) {
+          n_blocks <- n_blocks + 1
+          pos_info <- paste(pos_info, "_s", 
+                            as.character(start * step_size),
+                            "_e",
+                            as.character((end - 1) * step_size),
+                            sep = "")
+        }
+        vec[start:end] <- FALSE
+        break
+      }
+    }
+    
+  }
+  # n_bases, KaKs > 1 percentage, 
+  return(c(n_bases, KaKs_r, n_blocks, pos_info))
+}
+```
+
+```{r}
+
+# DP >= 5 samples
+C1G11_SM44B_KaKs_all_df <- read.table("SNP_DP5/variant_seq/C1G11_SM44Bsplit_114_6.axt.kaks",                        sep = "\t", header = TRUE)
+
+
+C1G11_SM44B_KaKs_all_df_shaped_part1 <- C1G11_SM44B_KaKs_all_df[1:500000,] %>%
+  rowwise() %>%
+  mutate(
+    pos = as.numeric(strsplit(Sequence, "\\(|-")[[1]][2]),
+    pair = paste(strsplit(Sequence, "\\(|_")[[1]][3], 
+                 strsplit(Sequence, "\\(|_")[[1]][4], 
+                 sep = "_"),
+    geneid = paste("FUN", 
+                   strsplit(Sequence, "\\(|_")[[1]][2],
+                   sep = "_")
+  )
+
+C1G11_SM44B_KaKs_all_df_shaped_part2 <- C1G11_SM44B_KaKs_all_df[500001:1000000,] %>%
+  rowwise() %>%
+  mutate(
+    pos = as.numeric(strsplit(Sequence, "\\(|-")[[1]][2]),
+    pair = paste(strsplit(Sequence, "\\(|_")[[1]][3], 
+                 strsplit(Sequence, "\\(|_")[[1]][4], 
+                 sep = "_"),
+    geneid = paste("FUN", 
+                   strsplit(Sequence, "\\(|_")[[1]][2],
+                   sep = "_")
+  )
+
+C1G11_SM44B_KaKs_all_df_shaped_part3 <- C1G11_SM44B_KaKs_all_df[1000001:1500000,] %>%
+  rowwise() %>%
+  mutate(
+    pos = as.numeric(strsplit(Sequence, "\\(|-")[[1]][2]),
+    pair = paste(strsplit(Sequence, "\\(|_")[[1]][3], 
+                 strsplit(Sequence, "\\(|_")[[1]][4], 
+                 sep = "_"),
+    geneid = paste("FUN", 
+                   strsplit(Sequence, "\\(|_")[[1]][2],
+                   sep = "_")
+  )
+
+C1G11_SM44B_KaKs_all_df_shaped_part4 <- C1G11_SM44B_KaKs_all_df[1500001:1500025,] %>%
+  rowwise() %>%
+  mutate(
+    pos = as.numeric(strsplit(Sequence, "\\(|-")[[1]][2]),
+    pair = paste(strsplit(Sequence, "\\(|_")[[1]][3], 
+                 strsplit(Sequence, "\\(|_")[[1]][4], 
+                 sep = "_"),
+    geneid = paste("FUN", 
+                   strsplit(Sequence, "\\(|_")[[1]][2],
+                   sep = "_")
+  )
+
+# C1G11_SM44B_KaKs_all_df_shaped <- rbind(C1G11_SM44B_KaKs_all_df_shaped_part1, 
+#                                         C1G11_SM44B_KaKs_all_df_shaped_part2, 
+#                                         C1G11_SM44B_KaKs_all_df_shaped_part3,
+#                                         C1G11_SM44B_KaKs_all_df_shaped_part4)
+
+C1G11_SM44B_KaKs_all_df_shaped <- bind_rows(C1G11_SM44B_KaKs_all_df_shaped_part1, 
+                                        C1G11_SM44B_KaKs_all_df_shaped_part2, 
+                                        C1G11_SM44B_KaKs_all_df_shaped_part3,
+                                        C1G11_SM44B_KaKs_all_df_shaped_part4)
+
+geneid_vec <- unique(C1G11_SM44B_KaKs_all_df_shaped$geneid)
+KaKs_all_df <- data.frame(geneid = unique(C1G11_SM44B_KaKs_all_df_shaped$geneid))
+KaKs_all_df$KaKs_bases <- rep(0, length(unique(C1G11_SM44B_KaKs_all_df_shaped$geneid)))
+KaKs_all_df$KaKs_r <- rep(0, length(unique(C1G11_SM44B_KaKs_all_df_shaped$geneid)))
+KaKs_all_df$n_blocks <- rep(0, length(unique(C1G11_SM44B_KaKs_all_df_shaped$geneid)))
+KaKs_all_df$pos_info <- rep("", length(unique(C1G11_SM44B_KaKs_all_df_shaped$geneid)))
+
+geneid_vec <- unique(C1G11_SM44B_KaKs_all_df_shaped$geneid)
+KaKs_all_df2 <- data.frame(geneid = unique(C1G11_SM44B_KaKs_all_df_shaped$geneid))
+KaKs_all_df2$KaKs_bases2 <- rep(0, length(unique(C1G11_SM44B_KaKs_all_df_shaped$geneid)))
+KaKs_all_df2$KaKs_r2 <- rep(0, length(unique(C1G11_SM44B_KaKs_all_df_shaped$geneid)))
+KaKs_all_df2$n_blocks2 <- rep(0, length(unique(C1G11_SM44B_KaKs_all_df_shaped$geneid)))
+KaKs_all_df2$pos_info2 <- rep("", length(unique(C1G11_SM44B_KaKs_all_df_shaped$geneid)))
+
+# Find high KaKs (dN/dS) ratio region
+for (idx in 1:length(geneid_vec)) {
+  geneid_df <- C1G11_SM44B_KaKs_all_df_shaped %>%
+    dplyr::filter(geneid == geneid_vec[idx])
+  
+  res1 <- get_KaKs_region(geneid_df)
+  KaKs_all_df$KaKs_bases[KaKs_all_df$geneid == geneid_vec[idx]] <- res1[1]
+  KaKs_all_df$KaKs_r[KaKs_all_df$geneid == geneid_vec[idx]] <- res1[2]
+  KaKs_all_df$n_blocks[KaKs_all_df$geneid == geneid_vec[idx]] <- res1[3]
+  KaKs_all_df$pos_info[KaKs_all_df$geneid == geneid_vec[idx]] <- res1[4]
+  
+  res2 <- get_KaKs_region(geneid_df, threshold = 2)
+  KaKs_all_df2$KaKs_bases2[KaKs_all_df2$geneid == geneid_vec[idx]] <- res2[1]
+  KaKs_all_df2$KaKs_r2[KaKs_all_df2$geneid == geneid_vec[idx]] <- res2[2]
+  KaKs_all_df2$n_blocks2[KaKs_all_df2$geneid == geneid_vec[idx]] <- res2[3]
+  KaKs_all_df2$pos_info2[KaKs_all_df2$geneid == geneid_vec[idx]] <- res2[4]
+  
+  print(paste("finished ", geneid_vec[idx]))
+}
+
+KaKs_all_df_update <- merge(KaKs_all_df, KaKs_all_df2, by.x = "geneid")
+write.csv(KaKs_all_df_update, "SNP_DP5/C1G11_SM44B_KaKs_all.csv", row.names = FALSE)
+
+# DP >= 5 samples
+# C1G11_C1C5v2
+C1G11_C1C5v2_KaKs_all_df <- read.table("SNP_DP5/variant_seq/C1G11_C1C5v2split_114_6.axt.kaks",                        sep = "\t", header = TRUE)
+
+C1G11_C1C5v2_KaKs_all_df_shaped_part1 <- C1G11_C1C5v2_KaKs_all_df[1:500000,] %>%
+  rowwise() %>%
+  mutate(
+    pos = as.numeric(strsplit(Sequence, "\\(|-")[[1]][2]),
+    pair = paste(strsplit(Sequence, "\\(|_")[[1]][3], 
+                 strsplit(Sequence, "\\(|_")[[1]][4], 
+                 sep = "_"),
+    geneid = paste("FUN", 
+                   strsplit(Sequence, "\\(|_")[[1]][2],
+                   sep = "_")
+  )
+
+C1G11_C1C5v2_KaKs_all_df_shaped_part2 <- C1G11_C1C5v2_KaKs_all_df[500001:1000000,] %>%
+  rowwise() %>%
+  mutate(
+    pos = as.numeric(strsplit(Sequence, "\\(|-")[[1]][2]),
+    pair = paste(strsplit(Sequence, "\\(|_")[[1]][3], 
+                 strsplit(Sequence, "\\(|_")[[1]][4], 
+                 sep = "_"),
+    geneid = paste("FUN", 
+                   strsplit(Sequence, "\\(|_")[[1]][2],
+                   sep = "_")
+  )
+
+C1G11_C1C5v2_KaKs_all_df_shaped_part3 <- C1G11_C1C5v2_KaKs_all_df[1000001:1500000,] %>%
+  rowwise() %>%
+  mutate(
+    pos = as.numeric(strsplit(Sequence, "\\(|-")[[1]][2]),
+    pair = paste(strsplit(Sequence, "\\(|_")[[1]][3], 
+                 strsplit(Sequence, "\\(|_")[[1]][4], 
+                 sep = "_"),
+    geneid = paste("FUN", 
+                   strsplit(Sequence, "\\(|_")[[1]][2],
+                   sep = "_")
+  )
+
+C1G11_C1C5v2_KaKs_all_df_shaped_part4 <- C1G11_C1C5v2_KaKs_all_df[1500001:2000000,] %>%
+  rowwise() %>%
+  mutate(
+    pos = as.numeric(strsplit(Sequence, "\\(|-")[[1]][2]),
+    pair = paste(strsplit(Sequence, "\\(|_")[[1]][3], 
+                 strsplit(Sequence, "\\(|_")[[1]][4], 
+                 sep = "_"),
+    geneid = paste("FUN", 
+                   strsplit(Sequence, "\\(|_")[[1]][2],
+                   sep = "_")
+  )
+
+C1G11_C1C5v2_KaKs_all_df_shaped_part5 <- C1G11_C1C5v2_KaKs_all_df[2000001:2500000,] %>%
+  rowwise() %>%
+  mutate(
+    pos = as.numeric(strsplit(Sequence, "\\(|-")[[1]][2]),
+    pair = paste(strsplit(Sequence, "\\(|_")[[1]][3], 
+                 strsplit(Sequence, "\\(|_")[[1]][4], 
+                 sep = "_"),
+    geneid = paste("FUN", 
+                   strsplit(Sequence, "\\(|_")[[1]][2],
+                   sep = "_")
+  )
+
+C1G11_C1C5v2_KaKs_all_df_shaped_part6 <- C1G11_C1C5v2_KaKs_all_df[2500001:27,] %>%
+  rowwise() %>%
+  mutate(
+    pos = as.numeric(strsplit(Sequence, "\\(|-")[[1]][2]),
+    pair = paste(strsplit(Sequence, "\\(|_")[[1]][3], 
+                 strsplit(Sequence, "\\(|_")[[1]][4], 
+                 sep = "_"),
+    geneid = paste("FUN", 
+                   strsplit(Sequence, "\\(|_")[[1]][2],
+                   sep = "_")
+  )
+
+# C1G11_SM44B_KaKs_all_df_shaped <- rbind(C1G11_SM44B_KaKs_all_df_shaped_part1, 
+#                                         C1G11_SM44B_KaKs_all_df_shaped_part2, 
+#                                         C1G11_SM44B_KaKs_all_df_shaped_part3,
+#                                         C1G11_SM44B_KaKs_all_df_shaped_part4)
+
+C1G11_C1C5v2_KaKs_all_df_shaped <- bind_rows(C1G11_C1C5v2_KaKs_all_df_shaped_part1, 
+                                        C1G11_C1C5v2_KaKs_all_df_shaped_part2, 
+                                        C1G11_C1C5v2_KaKs_all_df_shaped_part3,
+                                        C1G11_C1C5v2_KaKs_all_df_shaped_part4)
+
+geneid_vec <- unique(C1G11_SM44B_KaKs_all_df_shaped$geneid)
+KaKs_all_df <- data.frame(geneid = unique(C1G11_SM44B_KaKs_all_df_shaped$geneid))
+KaKs_all_df$KaKs_bases <- rep(0, length(unique(C1G11_SM44B_KaKs_all_df_shaped$geneid)))
+KaKs_all_df$KaKs_r <- rep(0, length(unique(C1G11_SM44B_KaKs_all_df_shaped$geneid)))
+KaKs_all_df$n_blocks <- rep(0, length(unique(C1G11_SM44B_KaKs_all_df_shaped$geneid)))
+KaKs_all_df$pos_info <- rep("", length(unique(C1G11_SM44B_KaKs_all_df_shaped$geneid)))
+
+geneid_vec <- unique(C1G11_SM44B_KaKs_all_df_shaped$geneid)
+KaKs_all_df2 <- data.frame(geneid = unique(C1G11_SM44B_KaKs_all_df_shaped$geneid))
+KaKs_all_df2$KaKs_bases2 <- rep(0, length(unique(C1G11_SM44B_KaKs_all_df_shaped$geneid)))
+KaKs_all_df2$KaKs_r2 <- rep(0, length(unique(C1G11_SM44B_KaKs_all_df_shaped$geneid)))
+KaKs_all_df2$n_blocks2 <- rep(0, length(unique(C1G11_SM44B_KaKs_all_df_shaped$geneid)))
+KaKs_all_df2$pos_info2 <- rep("", length(unique(C1G11_SM44B_KaKs_all_df_shaped$geneid)))
+
+# Find high KaKs (dN/dS) ratio region
+for (idx in 1:length(geneid_vec)) {
+  geneid_df <- C1G11_SM44B_KaKs_all_df_shaped %>%
+    dplyr::filter(geneid == geneid_vec[idx])
+  
+  res1 <- get_KaKs_region(geneid_df)
+  KaKs_all_df$KaKs_bases[KaKs_all_df$geneid == geneid_vec[idx]] <- res1[1]
+  KaKs_all_df$KaKs_r[KaKs_all_df$geneid == geneid_vec[idx]] <- res1[2]
+  KaKs_all_df$n_blocks[KaKs_all_df$geneid == geneid_vec[idx]] <- res1[3]
+  KaKs_all_df$pos_info[KaKs_all_df$geneid == geneid_vec[idx]] <- res1[4]
+  
+  res2 <- get_KaKs_region(geneid_df, threshold = 2)
+  KaKs_all_df2$KaKs_bases2[KaKs_all_df2$geneid == geneid_vec[idx]] <- res2[1]
+  KaKs_all_df2$KaKs_r2[KaKs_all_df2$geneid == geneid_vec[idx]] <- res2[2]
+  KaKs_all_df2$n_blocks2[KaKs_all_df2$geneid == geneid_vec[idx]] <- res2[3]
+  KaKs_all_df2$pos_info2[KaKs_all_df2$geneid == geneid_vec[idx]] <- res2[4]
+  
+  print(paste("finished ", geneid_vec[idx]))
+}
+
+KaKs_all_df_update <- merge(KaKs_all_df, KaKs_all_df2, by.x = "geneid")
+write.csv(KaKs_all_df_update, "SNP_DP5/C1G11_C1C5v2_KaKs_all.csv", row.names = FALSE)
+
+```
+
+## Do InterProScan enrichment analysis
+
+```{r}
+
+KaKs_all_df_update <- read.csv("SNP_DP5/C1G11_C1C5v2_KaKs_all.csv")
+flexa_IPS <- read.csv("/Users/uhoro/bio/pasteur/Cflexa_genome_2024-05-02/InterProScan_out/flexa2405_out.csv")
+
+IPR_ID <- unique(flexa_IPS$interpro_accession)
+IPR_ID <- IPR_ID[2:length(IPR_ID)]
+
+IPR_des <- rep("", length(IPR_ID))
+for (i in 1:length(IPR_ID)) {
+  IPR_des[i] <- flexa_IPS$interpro_description[flexa_IPS$interpro_accession == IPR_ID[i]][1]
+}
+IPR_map <- data.frame(IPR_ID, IPR_des)
+
+flexa_IPS %>%
+  group_by(protein_id) %>%
+  reframe(
+    geneid = unlist(strsplit(protein_id, "-"))[1],
+    IPR_ID_vec = unique(interpro_accession)
+  ) -> flexa_IPS_sum
+
+# Gene set, annotated, significant, expected
+library(seqinr)
+cds.fasta.in <- "/Users/uhoro/bio/pasteur/Cflexa_genome_2024-07-16/Cflexa.cds-transcripts.Hoceani_pruned.fa"
+# read in fasta file with all proteins
+print(paste0('Reading in ', cds.fasta.in, '...'))
+cds.fa <- read.fasta(cds.fasta.in, seqtype = 'DNA', as.string = TRUE, set.attributes = FALSE,
+                     whole.header = TRUE)
+# convert list to data frame
+cds_fa_df <- data.frame('Name' = names(cds.fa), stringsAsFactors = FALSE)
+for (i in 1:length(names(cds.fa)))
+{
+  cds_fa_df$sequence[i] <- toupper(cds.fa[[i]])
+}
+
+cds_fa_df %>%
+  rowwise() %>%
+  mutate(
+    geneid = unlist(strsplit(Name, split = " "))[2],
+    len_AA = nchar(sequence)
+  ) -> cds_fa_df_updated
+
+geneAll <- cds_fa_df_updated$geneid
+geneBackground <- flexa_IPS_sum %>% 
+  filter(!IPR_ID_vec == "-") %>%
+  group_by(geneid) %>%
+  reframe(
+    IPR_ID_vec = paste0(IPR_ID_vec, collapse = "_")
+  )
+# Number of all genes with IPR description: 12795
+NgeneBackground <- nrow(geneBackground)
+print(NgeneBackground)
+flexa_IPS_sum %>%
+  filter(!IPR_ID_vec == "-") %>%
+  group_by(IPR_ID_vec) %>%
+  reframe(
+    annotated = n()
+  ) %>% 
+  dplyr::rename(IPR_ID = IPR_ID_vec)-> annotated_df
+
+IPR_map2 <- merge(IPR_map, annotated_df, by.x = "IPR_ID",  all.x = TRUE)
+
+geneVec <- KaKs_all_df_update %>%
+  filter(n_blocks2 >= 1) 
+
+myInterestingGenes <- geneVec$geneid
+NgeneSignificant <- sum(myInterestingGenes %in% geneBackground$geneid)
+print(NgeneSignificant)
+
+flexa_IPS_sum %>%
+  filter(!IPR_ID_vec == "-") %>%
+  filter(geneid %in% myInterestingGenes) %>%
+  group_by(IPR_ID_vec) %>%
+  reframe(
+    significant = n()
+  ) %>% 
+  dplyr::rename(IPR_ID = IPR_ID_vec)-> significant_df
+
+IPR_map3 <- merge(IPR_map2, significant_df, by.x = "IPR_ID",  all.x = TRUE)
+IPR_map3$significant[is.na(IPR_map3$significant)] <- 0
+IPR_map4 <- IPR_map3 %>%
+  mutate(
+    expected = annotated * NgeneSignificant / NgeneBackground
+  )
+
+fisher_res <- rep(1, length(IPR_map4$IPR_ID))
+for (i in 1:length(IPR_map4$IPR_ID)) {
+  dat <- data.frame(Background = c(IPR_map4$annotated[i], NgeneBackground - IPR_map4$annotated[i]),
+             Set = c(IPR_map4$significant[i], NgeneSignificant - IPR_map4$significant[i]))
+  fisher_res[i] <- fisher.test(dat)$p.value
+}
+
+IPR_map4$fisher_res <- fisher_res
+
+IPR_map4 %>%
+  mutate(
+    fisher_BF = fisher_res * nrow(IPR_map4),
+    IDlong = paste(IPR_des, IPR_ID),
+    gene_count = significant
+  ) %>%
+  mutate(
+    IDlong = fct_reorder(IDlong, -log10(fisher_res))
+  ) -> IPR_map5
+
+IPR_map5 <- IPR_map5[order(IPR_map5$fisher_res),] 
+write.csv(IPR_map5, "SNP_DP5/IPR_map5_DP5.csv", row.names = FALSE)
+# p <- IPR_map5[1:50,] %>%
+#   ggplot(aes(x = -log10(fisher_res), y = IDlong, size = gene_count)) +
+#   geom_point() + theme_bw() +
+#   ylab("InterProScan feature") +
+#   xlab("- log10 p value") +
+#   ggtitle("KaKs > 2, 1 block, top 50 InterProScan feature") +
+#   theme(plot.title = element_text(hjust = 1))
+# p
+
+#ggsave("GOenrichment_result/KaKs2_ge1_C1G11_C1C5v2_IPS_DP2.svg", width = 8, height = 12)
+
+p <- IPR_map5[1:50,] %>%
+  # filter(IPR_ID %in% c("IPR000242", "IPR000203", "IPR002595", 
+  #                       "IPR013783", "IPR000742", "IPR000832")) %>%
+  ggplot(aes(x = -log10(fisher_res), y = IDlong, fill = gene_count)) +
+  geom_bar(stat = "identity", aes(fill=gene_count), width = 0.5) + 
+  scale_fill_gradient(limits = c(0,40), low='#FFFFFF', high='#FF0000') + 
+  #geom_point(shape = 1,size = 12,colour = "black")+ 
+  theme_bw() + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  ylab("InterProScan feature") +
+  xlim(0,9) +
+  xlab("- log10 p value") +
+  ggtitle("KaKs > 2, 1 block, top InterProScan nonredundant feature") +
+  theme(plot.title = element_text(hjust = 1))
+p
+ggsave("GOenrichment_result/KaKs2_ge1_C1G11_C1C5v2_IPS_DP5_top50.svg", width = 8, height = 12)
+
+p <- IPR_map5[1:50,] %>%
+  filter(IPR_ID %in% c("IPR000242",  
+                       "IPR013783", "IPR000742", 
+                       "IPR003410", "IPR015919", 
+                       "IPR003961", "IPR000980")) %>%
+  ggplot(aes(x = -log10(fisher_res), y = IDlong, fill = gene_count)) +
+  geom_bar(stat = "identity", aes(fill=gene_count), width = 0.5) + 
+  #scale_fill_gradient(limits = c(0,14), low='#FFFFFF', high='#FF0000') + 
+  scale_fill_gradient(limits = c(0,25), low='#FFFFFF', high='#40e0d0') + 
+  #geom_point(shape = 1,size = 12,colour = "black")+ 
+  theme_bw() + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  ylab("InterProScan feature") +
+  xlim(0,9) +
+  xlab("- log10 p value") +
+  ggtitle("KaKs > 2, 1 block, top InterProScan nonredundant feature") +
+  theme(plot.title = element_text(hjust = 1))
+
+p
+
+ggsave("GOenrichment_result/KaKs2_ge1_C1G11_C1C5v2_IPS_selected_bar_turquoise_DP5.svg", width = 8, height = 5)
+
+```
+
+
+Draw KaKs values in selected genes
+```{r}
+C1G11_SM44B_KaKs_all_df_shaped_part <- read.csv("SNP_DP5/C1G11_C1C5v2_KaKs_val_gene_of_interest.csv")
+
+threshold6 <- function(x, thre = 6.0) {
+  if (is.na(x)) {
+    return(x)
+  }
+  else if (x <= thre) {
+    return(x)
+  } else {
+    return(thre)
+  }
+}
+
+threshold4 <- function(x, thre = 4.0) {
+  if (is.na(x)) {
+    return(x)
+  }
+  else if (x <= thre) {
+    return(x)
+  } else {
+    return(thre)
+  }
+}
+
+C1G11_SM44B_KaKs_all_df_shaped_part$KaKsthreshold6 <- unlist(lapply(C1G11_SM44B_KaKs_all_df_shaped_part$Ka.Ks, threshold4))
+
+C1G11_SM44B_KaKs_all_df_shaped_part$KaKsthreshold4 <- unlist(lapply(C1G11_SM44B_KaKs_all_df_shaped_part$Ka.Ks, threshold4))
+
+C1G11_SM44B_KaKs_all_df_shaped_part$KaKsmax <- C1G11_SM44B_KaKs_all_df_shaped_part$KaKsthreshold4
+
+C1G11_SM44B_KaKs_all_df_shaped_part$KaKsmin <- 0
+
+gene <- "FUN_000083" # 000092, 000296, 007060, 000083
+title <- paste(gene, " KaKs ratio between C1G11 and C1C5v2", sep = "")
+p <- C1G11_SM44B_KaKs_all_df_shaped_part %>%
+  filter(geneid == gene) %>%
+  ggplot(aes(x = pos, y = KaKsthreshold4, 
+             ymax = KaKsmax,
+             ymin = KaKsmin, 
+             fill = "red")) + 
+  #geom_point(na.rm = TRUE) + 
+  geom_line(na.rm = TRUE) + theme_bw() +
+  geom_ribbon() +
+  xlab("Position in bp") + 
+  ylab("Ka/Ks ratio") + 
+  ylim(0,6) + 
+  #xlim(1800, 1900) +
+  ggtitle(title)
+#xlim(11000, 13000)
+#ylim(0, 5)
+p
+svg_title <- paste("SNP_DP5/", gene, "_KaKs_C1G11_C1C5v2_threshold6.svg")
+ggsave(svg_title, width = 12, height = 3)
+
+```
+
+Draw SNP locations in selected genes
+```{r}
+data_name <- "SNPp1_set240924_wo_C1A4_DP2.ann.filter.g_annot_prot_synmisnon.csv"
+
+bindedp1_g_annot_prot_mut <- read.csv(data_name)
+
+SNP_of_interest <- bindedp1_g_annot_prot_mut %>%
+  filter(Cfle_g %in% c("FUN_000296", "FUN_000092", "FUN_007060", "FUN_008825")) %>%
+  filter(DPC1C5v2 >= 5 & DPC3D7v2 >= 5)
+SNP_of_interest$SNP_pos <- rep(NA, nrow(SNP_of_interest))
+bindedp1_g_annot_prot_test <- SNP_of_interest
+
+
+for (iSNP in 1:nrow(SNP_of_interest)) {
+  gene_id <- bindedp1_g_annot_prot_test$Cfle_g[iSNP]
+  print(gene_id)
+  alt_vec <- unlist(strsplit(as.character(bindedp1_g_annot_prot_test[iSNP, "ALT"]), ","))
+  df_test <- tibble(ANN = unlist(strsplit(as.character(bindedp1_g_annot_prot_test[iSNP, "ANN"]), ",")))
+  df_test_wider <- df_test %>% 
+    separate(ANN, c("allele", "annot", "impact", "gene_name", "gene_id", "feature_type",
+                    "feature_ID","transcript_biotype", "rank_total", "HGVS.c", "HGVS.p", 
+                    "cDNApos", "CDSpos", "Protpos", "dist_to_feature"), "\\|", extra = "merge")
+  
+  # Get CDS position of SNP according to non "*" mutation annotation
+  SNP_type_ref <- 1
+  if (alt_vec[1] == "*") {
+    SNP_type_ref <- 2
+  }
+  CDSpos <- df_test_wider$CDSpos[df_test_wider$allele == alt_vec[SNP_type_ref] &
+                                   df_test_wider$gene_id == gene_id]
+  SNPpos <- as.numeric(unlist(strsplit(CDSpos, "/"))[1])
+  print(SNPpos)
+  bindedp1_g_annot_prot_test$SNP_pos[iSNP] <- SNPpos
+}
+
+SNP_of_interest <- bindedp1_g_annot_prot_test 
+
+SNP_of_interest %>% 
+  dplyr::select(-starts_with("DP")) %>%
+  dplyr::select(-starts_with("AD")) %>%
+  mutate(
+    nonsyn = mis + non
+  )-> SNP_of_interest_trimmed
+
+SNP_of_interest_trimmed$nonsyn <- as.factor(SNP_of_interest_trimmed$nonsyn)
+
+gene <- "FUN_000296" # 000092, 000296, 007060, 000083
+
+SNP_of_interest_trimmed %>%
+  filter(Cfle_g == gene) %>%
+  filter(C1C5v2 == 1 | C3D7v2 == 1) %>%
+  filter(nonsyn == 1) -> dat
+title <- paste(gene, "non-synonymous mutations, C1C5v2, C3D7v2 against C1G11")
+ggplot(data = dat, aes(x = SNP_pos)) + 
+  geom_histogram(data=subset(dat, C1C5v2 != C1G11), binwidth = 100, color = "red", fill = "red", alpha = 0.2) +
+  geom_histogram(data=subset(dat, C3D7v2 != C1G11), binwidth = 100, color = "blue", fill = "blue", alpha = 0.2) +
+  scale_y_continuous(breaks = c(0, 2, 4, 6, 8, 10, 12)) +
+  #geom_histogram(aes(y=..density..), color = "black", fill = "gray") + 
+  #geom_density(adjust = 1/5, alpha = 0.2) + 
+  #xlim(-100, 2805) + 
+  theme_bw() + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  ggtitle(title)
+
+svg_title <- paste("SNP_DP5/", gene, "_non-synonymous_C1C5v2_C3D7v2_against_C1G11.svg", sep = "")
+ggsave(svg_title, width = 12, height = 3)
+
+
+
+```
+
+
+Plot all genes with KaKs >= 2 and SNP with (DP >= 5 in C1C5v2 and C3D7v2)
+Prepare KaKs data and SNP coordinates
+```{r}
+library(cowplot)
+
+# Prepare KaKs input dataframe
+C1G11_SM44B_KaKs_all_df_shaped_part <- read.csv("SNP_DP5/C1G11_C1C5v2_KaKs_val_KaKs_ge_2.csv")
+
+KaKs2_genes <- unique(C1G11_SM44B_KaKs_all_df_shaped_part$geneid)
+
+C1G11_SM44B_KaKs_all_df_shaped_part$KaKsthreshold6 <- unlist(lapply(C1G11_SM44B_KaKs_all_df_shaped_part$Ka.Ks, threshold4))
+
+C1G11_SM44B_KaKs_all_df_shaped_part$KaKsthreshold4 <- unlist(lapply(C1G11_SM44B_KaKs_all_df_shaped_part$Ka.Ks, threshold4))
+
+C1G11_SM44B_KaKs_all_df_shaped_part$KaKsmax <- C1G11_SM44B_KaKs_all_df_shaped_part$KaKsthreshold4
+
+C1G11_SM44B_KaKs_all_df_shaped_part$KaKsmin <- 0
+
+data_name <- "SNPp1_set240924_wo_C1A4_DP2.ann.filter.g_annot_prot_synmisnon.csv"
+
+bindedp1_g_annot_prot_mut <- read.csv(data_name)
+
+SNP_of_interest <- bindedp1_g_annot_prot_mut %>%
+  filter(Cfle_g %in% KaKs2_genes) %>%
+  filter(DPC1C5v2 >= 5 & DPC3D7v2 >= 5)
+SNP_of_interest$SNP_pos <- rep(NA, nrow(SNP_of_interest))
+bindedp1_g_annot_prot_test <- SNP_of_interest
+
+for (iSNP in 1:nrow(SNP_of_interest)) {
+  if (iSNP %% 5000 == 0) {
+    print(paste("processed", iSNP))
+  }
+  gene_id <- bindedp1_g_annot_prot_test$Cfle_g[iSNP]
+  #print(gene_id)
+  alt_vec <- unlist(strsplit(as.character(bindedp1_g_annot_prot_test[iSNP, "ALT"]), ","))
+  df_test <- tibble(ANN = unlist(strsplit(as.character(bindedp1_g_annot_prot_test[iSNP, "ANN"]), ",")))
+  df_test_wider <- df_test %>% 
+    separate(ANN, c("allele", "annot", "impact", "gene_name", "gene_id", "feature_type",
+                    "feature_ID","transcript_biotype", "rank_total", "HGVS.c", "HGVS.p", 
+                    "cDNApos", "CDSpos", "Protpos", "dist_to_feature"), "\\|", extra = "merge")
+  
+  # Get CDS position of SNP according to non "*" mutation annotation
+  SNP_type_ref <- 1
+  if (alt_vec[1] == "*") {
+    SNP_type_ref <- 2
+  }
+  CDSpos <- df_test_wider$CDSpos[df_test_wider$allele == alt_vec[SNP_type_ref] &
+                                   df_test_wider$gene_id == gene_id]
+  SNPpos <- as.numeric(unlist(strsplit(CDSpos, "/"))[1])
+  #print(SNPpos)
+  bindedp1_g_annot_prot_test$SNP_pos[iSNP] <- SNPpos
+}
+
+SNP_of_interest <- bindedp1_g_annot_prot_test 
+
+SNP_of_interest %>% 
+  dplyr::select(-starts_with("DP")) %>%
+  dplyr::select(-starts_with("AD")) %>%
+  mutate(
+    nonsyn = mis + non
+  )-> SNP_of_interest_trimmed
+
+SNP_of_interest_trimmed$nonsyn <- as.factor(SNP_of_interest_trimmed$nonsyn)
+
+
+```
+
+
+Plot with x axis in bp
+
+```{r}
+#gene <- "FUN_000296" # 000092, 000296, 007060, 008825
+genei <- 0
+for (gene in KaKs2_genes) {
+  genei <- genei + 1
+  if (genei %% 100 == 0) {
+    print(paste("processed", genei, "genes"))
+  }
+  xmax <- cds_fa_df_updated$len_AA[cds_fa_df_updated$geneid == gene] + 100
+  
+  pKaKs <- C1G11_SM44B_KaKs_all_df_shaped_part %>%
+    filter(geneid == gene) %>%
+    ggplot(aes(x = pos, y = KaKsthreshold4, 
+               ymax = KaKsmax,
+               ymin = KaKsmin, 
+               fill = "red")) + 
+    #geom_point(na.rm = TRUE) + 
+    geom_line(na.rm = TRUE) + theme_bw() +
+    geom_hline(yintercept = 1) +
+    geom_ribbon() +
+    xlab("Position in base pair") + 
+    ylab("Ka/Ks ratio") + 
+    ylim(0,4) + 
+    theme(panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          legend.position='none') + 
+    #xlim(1800, 1900) +
+    #ggtitle(title) + 
+    coord_cartesian(xlim = c(-50,xmax)) 
+  
+  #xlim(11000, 13000)
+  #ylim(0, 5)
+  
+  
+  SNP_of_interest_trimmed %>%
+    filter(Cfle_g == gene) %>%
+    filter(nonsyn == 1) -> dat
+  title <- paste(gene, "non-synonymous mutations, C1C5v2, C3D7v2 against C1G11")
+  
+  pSNP <- ggplot(data = dat, aes(x = SNP_pos)) + 
+    geom_histogram(data=subset(dat, C1C5v2 != C1G11), binwidth = 50, color = "red", fill = "red", alpha = 0.2) +
+    geom_histogram(data=subset(dat, C3D7v2 != C1G11), binwidth = 50, color = "blue", fill = "blue", alpha = 0.2) +
+    scale_y_continuous(breaks = c(0, 2, 4, 6, 8, 10, 12)) +
+    #geom_histogram(aes(y=..density..), color = "black", fill = "gray") + 
+    #geom_density(adjust = 1/5, alpha = 0.2) + 
+    #xlim(-100, 2805) + 
+    xlab("Position in base pair") + 
+    theme_bw() + 
+    theme(panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank(),
+          legend.position='none') +
+    # ggtitle(title) + 
+    coord_cartesian(xlim = c(-50,xmax))
+  
+  pp <- list(pKaKs, pSNP)
+  pp
+  
+  # now add the title
+  title <- ggdraw() + 
+    draw_label(
+      gene,
+      fontface = 'bold',
+      x = 0,
+      hjust = 0
+    ) +
+    theme(
+      # add margin on the left of the drawing canvas,
+      # so title is aligned with left edge of first plot
+      plot.margin = margin(0, 0, 0, 0)
+    )
+  plot_grid(title, 
+            plotlist=pp, ncol=1, align='v',
+            # rel_heights values control vertical title margins
+            rel_heights = c(0.1, 1, 1))
+  combined_svg <- paste("SNP_DP5/combined_plot_bp/bp_", gene, "_combined.svg", sep = "")
+  ggsave(combined_svg, width = 12, height = 6)
+}
+```
+
+ `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

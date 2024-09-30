@@ -1,0 +1,18 @@
+name: RRRR_SNP_analysis2
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - scipy
+  - python=3.10
+  - jupyterlab
+  - pip
+  - pip:
+      - ipywidgets==8.1.5
+      - jupyterlab-widgets==3.0.13
+      - pandas==2.2.3
+      - tqdm==4.66.5
+      - tzdata==2024.2
+      - widgetsnbextension==4.0.13
+
