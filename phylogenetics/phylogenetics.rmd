@@ -1,0 +1,93 @@
+---
+title: "RRRR_phylogenetics"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Description
+
+This is an R Markdown document used to analyze variant calling results of Ros-Rocher and Reyes-Rivera et al. 
+
+# Phylogenomic tree construction
+## Generate phylip format input file from vcf file to construct phylogenomic tree using IQ-TREE2
+
+```{r}
+######
+# Variants already filtered using bcftools (in samtools/1.18) with following settings
+# with DP >= 5 threshold
+# 
+# 
+# Do threshold
+# -m2 -M2 -e 'TYPE = "INDEL" || QUAL <= 30 || FORMAT/DP <= 4 || GT[*] = "mis" || GT[*] = "het"'
+#
+# srun -J filt -c 5 bcftools view --threads 4 -m2 -M2 -e \
+# 'TYPE = "INDEL" || QUAL <= 30 || FORMAT/DP <= 4 || GT[*] = "mis" || GT[*] = "het"'
+# VCFs/all_samples_p2_flexa_240723_set240924_wo_C1A4.vcf > \
+# VCFs/all_samples_p2_flexa_240723_set240924_wo_C1A4_filter.vcf
+# 
+######
+library(vcfR)
+vcfp2 <- read.vcfR(file = "VCFdata/all_samples_p2_flexa_240723_set240924_wo_C1A4_filter.vcf")
+
+snpp2 <- vcfp2
+FIXp2 <- as.data.frame(getFIX(snpp2))
+gtp2 <- as.data.frame(extract.gt(snpp2, IDtoRowNames = TRUE))
+gtp2 <- tibble::rownames_to_column(gtp2, var = "id")
+bindedp2 <- cbind(FIXp2, gtp2)
+
+# Check if all sites are the same
+bindedp2 %>%
+  rowwise() %>%
+  mutate(
+    all_1 = case_when(
+      substring(C1A1,1,1) == "1" && substring(C1A10,1,1) == "1" &&
+       substring(C1C5v2,1,1) == "1" &&
+      substring(C1C51,1,1) == "1" && substring(C1E4,1,1) == "1" &&
+      substring(C1G11,1,1) == "1" && substring(C2F9,1,1) == "1" &&
+      substring(C2H11,1,1) == "1" && substring(C3D7v2,1,1) == "1" &&
+      substring(SM44B,1,1) == "1" && substring(SM60B,1,1) == "1" ~ 1,
+      .default = 0
+    ),
+    all_same = case_when(
+      substring(C1A1,1,1) == substring(C1A10,1,1) && 
+        substring(C1C5v2,1,1) == substring(C1A1,1,1) &&
+        substring(C1C51,1,1) == substring(C1A1,1,1) && substring(C1E4,1,1) == substring(C1A1,1,1) &&
+        substring(C1G11,1,1) == substring(C1A1,1,1) && substring(C2F9,1,1) == substring(C1A1,1,1) &&
+        substring(C2H11,1,1) == substring(C1A1,1,1) && substring(C3D7v2,1,1) == substring(C1A1,1,1) &&
+        substring(SM44B,1,1) == substring(C1A1,1,1) && substring(SM60B,1,1) == substring(C1A1,1,1) ~ 1,
+      .default = 0
+    )
+  ) %>%
+  filter(
+    all_same == 0
+  ) -> bindedp2_alldif
+
+out_dir <- "outputs"
+
+if (!file.exists(out_dir)) {
+  dir.create(out_dir)
+}
+
+nrow(bindedp2_alldif) #nrow is 193564
+sink(paste(out_dir, "/all_p2_set240924_wo_C1A4_DP5.phy", sep = ""))
+cat("11 193564")
+cat("\n")
+for (sample in c("C1A1", "C1A10", "C1C5v2", "C1C51", "C1E4",
+                 "C1G11", "C2F9", "C2H11", "C3D7v2", "SM44B", "SM60B")) {
+  vec <- paste(substring(bindedp2_alldif[[sample]], 1, 1), collapse = "")
+  space <- paste(rep(" ", 10 - nchar(sample)), collapse = "")
+  line <- paste(sample, space, vec, sep = "")
+  cat(line)
+  cat("\n")
+}
+sink()
+
+```
+
+The following command was used to construct phylogenomic tree using iqtree2
+> iqtree2 -s all_p2_DP2_set240924.phy -m GTR2+G+ASC -B 1000 -alrt 1000 -nt AUTO
+
+
