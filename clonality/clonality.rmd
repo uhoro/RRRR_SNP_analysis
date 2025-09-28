@@ -1,0 +1,148 @@
+---
+title: "clonality"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Clonality analysis
+
+Compute the overlap of SNP between sheets and single cell-bottlenecked samples
+
+Prepare input file by converting from .vcf to .csv
+```{r}
+library(vcfR)
+out_dir <- "outputs"
+
+if (!file.exists(out_dir)) {
+  dir.create(out_dir)
+}
+
+
+# compute the overlap of SNP between sheets and single cell-bottlenecked samples
+vcfp4 <- read.vcfR(file = "VCFdata/all_samples_p4_flexa_240723_set240924.snps.filtered.passed.sorted.vcf.gz")
+snpp4 <- extract.indels(vcfp4)
+FIXp4 <- as.data.frame(getFIX(snpp4))
+gtp4 <- as.data.frame(extract.gt(snpp4, IDtoRowNames = TRUE))
+gtp4 <- tibble::rownames_to_column(gtp4, var = "id")
+bindedp4 <- cbind(FIXp4, gtp4)
+dpp4 <- as.data.frame(extract.gt(snpp4, element = "DP", IDtoRowNames = FALSE))
+
+addDP <- function(str) {
+  return(paste("DP", str, sep = ""))
+}
+
+colnames(dpp4) <- unlist(lapply(colnames(dpp4), addDP))
+
+bindedp4 <- cbind(bindedp4, dpp4)
+out_path <- paste(out_dir, "/bindedp4_set240924_filt250821.csv", sep = "")
+write.csv(bindedp4, out_path, row.names = FALSE)
+
+vcfp4 <- read.vcfR(file = "VCFdata/all_samples_p4_flexa_240723_set240924.indels.filtered.passed.sorted.vcf.gz")
+
+indelp4 <- extract.indels(vcfp4, return.indels = TRUE)
+FIXp4 <- as.data.frame(getFIX(indelp4))
+gtp4 <- as.data.frame(extract.gt(indelp4, IDtoRowNames = TRUE))
+gtp4 <- tibble::rownames_to_column(gtp4, var = "id")
+bindedp4 <- cbind(FIXp4, gtp4)
+dpp4 <- as.data.frame(extract.gt(indelp4, element = "DP", IDtoRowNames = FALSE))
+
+addDP <- function(str) {
+  return(paste("DP", str, sep = ""))
+}
+
+colnames(dpp4) <- unlist(lapply(colnames(dpp4), addDP))
+
+bindedp4 <- cbind(bindedp4, dpp4)
+out_path <- paste(out_dir, "/bindedp4_set240924_filt250821_INDEL.csv", sep = "")
+write.csv(bindedp4, out_path, row.names = FALSE)
+```
+
+Then, go to "clonality.ipynb" to obtain clonality summary data.
+
+Once the summary data is computed, 
+shape the clonality data from python script in a form of matrix for visualization
+
+```{r}
+library(forcats)
+library(tidyverse)
+library(dplyr)
+
+sample_vec2 <- c("SM44B", "C1C5v2", "C1A10", "C1E4", "C2F9",
+                 "SM60B", "C3D7v2", "C1C51", "C2H11", 
+                 "C1G11", "C1A1")
+summary_data_dir <- "output"
+filename <-  "filt250821_trim_summary_r"
+
+res_count_r_all_p4 <- read.csv(paste(summary_data_dir, filename, ".csv", sep = ""))
+
+res_count_r_all_p4 <- round(res_count_r_all_p4,digits=2)
+
+colnames(res_count_r_all_p4) <- sample_vec2
+rownames(res_count_r_all_p4) <- sample_vec2
+res_count_r_all_p4 %>%
+  rownames_to_column("s1") %>% 
+  pivot_longer(-s1, names_to = "s2", values_to = "r") %>%
+  mutate(
+    s1 = fct_relevel(s1, "SM44B", "C1C5v2", "C1A10", "C1E4", "C2F9",
+                 "SM60B", "C3D7v2", "C1C51", "C2H11", 
+                 "C1G11", "C1A1"),
+    s2 = fct_relevel(s2, "SM44B", "C1C5v2", "C1A10", "C1E4", "C2F9",
+                 "SM60B", "C3D7v2", "C1C51", "C2H11", 
+                 "C1G11", "C1A1")
+  ) -> res_count_r_all_reshaped_p4
+
+
+ggplot(res_count_r_all_reshaped_p4, aes(s2, s1)) + 
+  theme_bw() + 
+  geom_tile(aes(fill = r)) + 
+  geom_text(aes(label = round(r, 4))) +
+  scale_fill_gradient(low = "red", high = "white") +
+  scale_y_discrete(limits=rev) + 
+  labs(
+    title = "SNP clonality"
+  )
+
+ggplot_name <- paste(paste(summary_data_dir, "plots/", filename, ".svg", sep = ""))
+ggplot_name
+ggsave(ggplot_name)
+
+filename <-  "filt250821_INDEL_trim_summary_r"
+#res_count_r_all_p4 <- read.csv("p4/bindedp4_set240924_wo_C1A4_DP5_res_count_r.csv")
+res_count_r_all_p4 <- read.csv(paste(summary_data_dir, filename, ".csv", sep = ""))
+
+res_count_r_all_p4 <- round(res_count_r_all_p4,digits=2)
+
+colnames(res_count_r_all_p4) <- sample_vec2
+rownames(res_count_r_all_p4) <- sample_vec2
+res_count_r_all_p4 %>%
+  rownames_to_column("s1") %>% 
+  pivot_longer(-s1, names_to = "s2", values_to = "r") %>%
+  mutate(
+    s1 = fct_relevel(s1, "SM44B", "C1C5v2", "C1A10", "C1E4", "C2F9",
+                 "SM60B", "C3D7v2", "C1C51", "C2H11", 
+                 "C1G11", "C1A1"),
+    s2 = fct_relevel(s2, "SM44B", "C1C5v2", "C1A10", "C1E4", "C2F9",
+                 "SM60B", "C3D7v2", "C1C51", "C2H11", 
+                 "C1G11", "C1A1")
+  ) -> res_count_r_all_reshaped_p4
+
+
+ggplot(res_count_r_all_reshaped_p4, aes(s2, s1)) + 
+  theme_bw() + 
+  geom_tile(aes(fill = r)) + 
+  geom_text(aes(label = round(r, 4))) +
+  scale_fill_gradient(low = "red", high = "white") +
+  scale_y_discrete(limits=rev) + 
+  labs(
+    title = "INDEL clonality"
+  )
+
+ggplot_name <- paste(paste(summary_data_dir, "plots/", filename, ".svg", sep = ""))
+ggplot_name
+ggsave(ggplot_name)
+
+
+```

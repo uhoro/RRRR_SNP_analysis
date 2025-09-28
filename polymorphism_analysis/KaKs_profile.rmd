@@ -1,0 +1,108 @@
+---
+title: "KaKs_profile"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Plot KaKs values and the location of non synonymous mutations for a gene of interest
+
+```{r}
+library(cowplot)
+# Gene set, annotated, significant, expected
+library(seqinr)
+library(tidyverse)
+
+### PATH to reference cds file "data/reference_genome_data/Cflexa.cds-transcripts.Hoceani_pruned.fa ###
+# read in fasta file with all proteins
+cds.fasta.in <- "data/reference_genome_data/Cflexa.cds-transcripts.Hoceani_pruned.fa" 
+
+### Path to the kaks summary folder
+kaks_summary_path <- "results/kaks_summary/"
+
+### Gene id
+gene <- "FUN_003082" 
+  
+print(paste0('Reading in ', cds.fasta.in, '...'))
+cds.fa <- read.fasta(cds.fasta.in, seqtype = 'DNA', as.string = TRUE, set.attributes = FALSE,
+                     whole.header = TRUE)
+# convert list to data frame
+cds_fa_df <- data.frame('Name' = names(cds.fa), stringsAsFactors = FALSE)
+for (i in 1:length(names(cds.fa)))
+{
+  cds_fa_df$sequence[i] <- toupper(cds.fa[[i]])
+}
+
+cds_fa_df %>%
+  rowwise() %>%
+  mutate(
+    geneid = unlist(strsplit(Name, split = " "))[2],
+    len_AA = nchar(sequence)
+  ) -> cds_fa_df_updated
+
+
+xmin <- -50
+xmax <- cds_fa_df_updated$len_AA[cds_fa_df_updated$geneid == gene] + 100
+
+
+
+kaks_df <- read.csv(paste(kaks_summary_path, gene, ".csv", sep = ""))
+
+threshold4 <- function(x, thre = 4.0) {
+  if (is.na(x)) {
+    return(x)
+  }
+  else if (x <= thre) {
+    return(x)
+  } else {
+    return(thre)
+  }
+}
+
+
+kaks_df %>%
+  mutate(across(ends_with("KaKs"), threshold4)) -> kaks_df_thresholded
+
+kaks_df$C1G11_C1C5v2_KaKs_thre <- as.numeric(unlist(lapply(kaks_df$C1G11_C1C5v2_KaKs, threshold4)))
+kaks_df$C1G11_C3D7v2_KaKs_thre <- as.numeric(unlist(lapply(kaks_df$C1G11_C3D7v2_KaKs, threshold4)))
+kaks_df$C1C5v2_C3D7v2_KaKs_thre <- as.numeric(unlist(lapply(kaks_df$C1C5v2_C3D7v2_KaKs, threshold4)))
+kaks_df$avg_KaKs_thre <- unlist(lapply(kaks_df$avg_KaKs, threshold4))
+kaks_df$KaKsmin <- 0.0
+
+
+kaks_df_long <- kaks_df %>%
+  pivot_longer(!c(pos, KaKsmin), names_to = "kaks_combination", values_to = "kaks_val")
+
+pKaKs <- kaks_df_long %>%
+  filter(kaks_combination %in% c("C1C5v2_C3D7v2_KaKs_thre",
+                                 "C1G11_C1C5v2_KaKs_thre", 
+                                 "C1G11_C3D7v2_KaKs_thre")) %>%
+  #filter(geneid == gene) %>%
+  ggplot(aes(x = pos)) + 
+  geom_ribbon(aes(ymin = KaKsmin, 
+                  ymax = kaks_val,
+                  fill = kaks_combination), alpha = 0.3) + 
+  scale_fill_manual(values = c("red", "blue", "green"),
+                    breaks=c("C1G11_C1C5v2_KaKs_thre",
+                           "C1G11_C3D7v2_KaKs_thre",
+                           "C1C5v2_C3D7v2_KaKs_thre")) +
+  theme_bw() +
+  geom_hline(yintercept = 2) +
+  xlab("Position in base pair") + 
+  ylab("Ka/Ks ratio") + 
+  ylim(0,4.0) + 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        legend.position='none') + 
+  #xlim(1800, 1900) +
+  #ggtitle(title) + 
+  coord_cartesian(xlim = c(xmin,xmax)) 
+
+pKaKs
+
+combined_svg <- paste(kaks_summary_path,"bp_", gene, "_kaks_all_pair.svg", sep = "")
+ggsave(combined_svg, width = 12, height = 3)
+```
+
