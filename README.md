@@ -1,8 +1,5 @@
-The codes used to conduct SNP analysis in Ros-Rocher and Reyes- Rivera et al. 
+The codes used to conduct SNP analysis in Ros-Rocher and Reyes- Rivera et al. 2025 
 
-Most analysis and visualization was performed (and/or described) in "RRRR_SNP_analysis_v4.rmd."
-
-Python codes are also available for clonality analysis "clonality.ipynb" and to find high dN/dS (Ka/Ks) region "Find_high_KaKs_v2.ipynb"
-# Data availability
-
-See
+To construct phylogenetic tree of C. flexa strains, codes in "phylogenetics" folder are used.
+To quantily the clonality of different C. flexa strains, codes in "clonality" folder are used. Main code is "clonality.rmd"
+To perform polymorphism analysis, codes in "polymorphism_analysis" are used. See polymorphisum.html for the details of the workflow.
