@@ -7,3 +7,5 @@ To quantily the clonality of different C. flexa strains, codes in "clonality" fo
 To perform polymorphism analysis, codes in "polymorphism_analysis" are used. See polymorphism.html for the details of the workflow.
 
 All python codes should be run in the environment created from RRRR_SNP_analysis2.yml 
+
+Codes were tested in MacOS 14.6.1
