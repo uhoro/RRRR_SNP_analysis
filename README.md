@@ -1,4 +1,8 @@
-The codes used to conduct SNP analysis in Ros-Rocher and Reyes-Rivera et al. 2025 
+The codes used to conduct SNP analysis in Ros-Rocher and Reyes-Rivera et al. 
+
+Source data is deposited in zenodo with the following doi
+Choanoeca flexa reference genome : 10.5281/zenodo.13837466
+WGS reads of Choanoeca flexa strains : 10.5281/zenodo.13837614
 
 To construct phylogenetic tree of C. flexa strains, codes in "phylogenetics" folder are used.
 
